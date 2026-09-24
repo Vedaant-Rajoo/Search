@@ -28,7 +28,7 @@ enum Web {
     /// included, and registering a name twice is a hard crash.
     @MainActor static func release(_ controller: WKUserContentController) {
         for name in [ScrollRelay.name, VeilRelay.name, FormRelay.name, ImageRelay.name,
-                     StoreRelay.name, PasskeyRelay.name, MiddleRelay.name] {
+                     StoreRelay.name, PasskeyRelay.name, MiddleRelay.name, PipRelay.name] {
             controller.removeScriptMessageHandler(forName: name, contentWorld: world)
             controller.removeScriptMessageHandler(forName: name, contentWorld: .page)
         }
@@ -111,9 +111,9 @@ enum Web {
         config.mediaTypesRequiringUserActionForPlayback = .audio
         if Store.testing, !Store.measuring { config.preferences.inactiveSchedulingPolicy = .none }
         inspector(config.preferences)
-        // Same private preference Safari flips so a video may enter the
-        // system's picture-in-picture. Without it, `_togglePictureInPicture`
-        // is present but refuses. Asked by name first (see Pip.swift).
+        // Required for webkitSetPresentationMode('picture-in-picture'): without
+        // it, chrome-initiated enter stays inline and Float takes over instead
+        // (see docs/native-pip-spike.md). Asked by name first.
         Pip.allow(on: config.preferences)
         return config
     }
@@ -330,6 +330,9 @@ final class Tab: ObservableObject, Identifiable {
     /// WebKit keeps each kind of view to its own pages, so the tab has to be
     /// swapped for one built for the address (see Browser.replace).
     var onCross: ((Tab, URL) -> Void)?
+    /// System picture-in-picture mode on this page changed. `returned` is true
+    /// when the page left PiP (system close or return-to-tab).
+    var onPipMode: ((Tab, String, Bool) -> Void)?
     /// The extension whose store page has its own "Add to Search" button in
     /// place — so the bar at the bottom of the window doesn't offer it twice.
     @Published var storePlaced: String?
@@ -340,6 +343,7 @@ final class Tab: ObservableObject, Identifiable {
     private let images = ImageRelay()
     private let shop = StoreRelay()
     private let middles = MiddleRelay()
+    private let pips = PipRelay()
     private let passkeyRelay = PasskeyRelay()
     private let hovered = HoveredLink()
     private let ears = AudioWatch()
@@ -469,6 +473,7 @@ final class Tab: ObservableObject, Identifiable {
         hovered.tab = self
         controller.add(hovered, contentWorld: .defaultClient, name: HoveredLink.name)
         controller.add(middles, contentWorld: Web.world, name: MiddleRelay.name)
+        controller.add(pips, contentWorld: Web.world, name: PipRelay.name)
         Shield.shared.protect(controller)
         built = web
         // A tab muted before it went to sleep wakes muted.
@@ -513,6 +518,7 @@ final class Tab: ObservableObject, Identifiable {
         images.tab = self
         shop.tab = self
         middles.tab = self
+        pips.tab = self
         ears.watch(web) { [weak self] on in self?.noisy = on }
         return web
     }
@@ -590,6 +596,9 @@ final class Tab: ObservableObject, Identifiable {
         // that frame's own business, and its link is not this tab's to open.
         controller.addUserScript(
             WKUserScript(source: MiddleRelay.watch, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: Web.world)
+        )
+        controller.addUserScript(
+            WKUserScript(source: PipRelay.watch, injectionTime: .atDocumentEnd, forMainFrameOnly: true, in: Web.world)
         )
         // Passkeys stand in the page's own world — they replace the page's
         // functions — and reach Search through a bridge in Search's, off or on:
