@@ -1516,14 +1516,15 @@ final class Browser: NSObject, ObservableObject {
     }
 
     /// System PiP is up for the tracked tab (page still in the stage).
+    /// Bookkeeping is `floating` without `tab.floating` — WebKit's private
+    /// `_isPictureInPictureActive` can lag behind `webkitPresentationMode`.
     private var nativePipActive: Bool {
-        guard let id = floating, let tab = tabs.first(where: { $0.id == id }),
-              !tab.floating, let built = tab.built else { return false }
-        return Pip.active(on: built)
+        guard let id = floating, let tab = tabs.first(where: { $0.id == id }) else { return false }
+        return !tab.floating
     }
 
-    /// Prefer WebKit's own picture-in-picture when the selectors are there and
-    /// a video can toggle; otherwise Float moves the page (see Float.swift).
+    /// Prefer WebKit's own picture-in-picture when the selectors are there;
+    /// otherwise Float moves the page (see Float.swift).
     private func lift(_ tab: Tab?, quietly: Bool) {
         // A tab just put down with ⌘W has no page to lift a video out of, and
         // asking it would only build an empty view to ask.
@@ -1532,11 +1533,40 @@ final class Browser: NSObject, ObservableObject {
         // A hero background on a studio's home page is a video too, and it
         // followed people around the desktop. ⌘⇧P still lifts from anywhere.
         if quietly, !Players.knows(tab.address) { return }
-        if Pip.available, Pip.toggle(on: tab.web) {
-            // Page stays in the stage — do not set tab.floating.
-            floating = tab.id
+
+        if Pip.available {
+            let before = Pip.active(on: tab.web)
+            Pip.toggle(on: tab.web)
+            // The SPI is void; give WebKit a turn, then confirm. If it did not
+            // take, try the video element's presentation mode from chrome JS
+            // (no page layout change either).
+            DispatchQueue.main.async { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    if Pip.active(on: tab.web) != before {
+                        self.floating = tab.id
+                        return
+                    }
+                    tab.web.evaluateInSearch(Pip.enterJS) { [weak self] answer in
+                        MainActor.assumeIsolated {
+                            guard let self else { return }
+                            let status = answer as? String ?? ""
+                            if status == "webkit" || status == "already" || status == "webkit-called"
+                                || status == "request-called" || Pip.active(on: tab.web) {
+                                self.floating = tab.id
+                                return
+                            }
+                            self.liftWithFloat(tab, quietly: quietly)
+                        }
+                    }
+                }
+            }
             return
         }
+        liftWithFloat(tab, quietly: quietly)
+    }
+
+    private func liftWithFloat(_ tab: Tab, quietly: Bool) {
         tab.web.evaluateInSearch(Isolate.on) { [weak self] answer in
             MainActor.assumeIsolated {
                 guard let self else { return }
@@ -1561,8 +1591,9 @@ final class Browser: NSObject, ObservableObject {
         let wasNative = !tab.floating
         floating = nil
         tab.floating = false
-        if wasNative, let built = tab.built {
-            Pip.exit(on: built)
+        if wasNative {
+            if let built = tab.built { Pip.exit(on: built) }
+            tab.web.evaluateInSearch(Pip.exitJS)
             return
         }
         tab.web.evaluateInSearch(Isolate.off)

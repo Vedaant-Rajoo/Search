@@ -11,7 +11,6 @@ enum Pip {
     private static let toggle = NSSelectorFromString("_togglePictureInPicture")
     private static let canToggle = NSSelectorFromString("_canTogglePictureInPicture")
     private static let isActive = NSSelectorFromString("_isPictureInPictureActive")
-    private static let allowGet = NSSelectorFromString("_allowsPictureInPictureMediaPlayback")
     private static let allowSet = NSSelectorFromString("_setAllowsPictureInPictureMediaPlayback:")
 
     /// Every selector this path needs is present on this WebKit.
@@ -41,12 +40,13 @@ enum Pip {
         return unsafeBitCast(web.method(for: canToggle), to: Read.self)(web, canToggle)
     }
 
-    /// Enter or leave system PiP. Returns false when the selectors are missing
-    /// or WebKit says there is nothing to toggle yet.
+    /// Ask WebKit to enter or leave system PiP. The call is void; callers that
+    /// need to know whether it took should check `active(on:)` on the next turn.
+    /// `_canTogglePictureInPicture` is often false until a frame has painted,
+    /// so it is not used as a hard gate here — only as a hint.
     @discardableResult
     static func toggle(on web: WKWebView) -> Bool {
         guard available, web.responds(to: toggle) else { return false }
-        guard canToggle(on: web) || active(on: web) else { return false }
         typealias Call = @convention(c) (AnyObject, Selector) -> Void
         unsafeBitCast(web.method(for: toggle), to: Call.self)(web, toggle)
         return true
@@ -57,4 +57,67 @@ enum Pip {
         guard active(on: web) else { return }
         toggle(on: web)
     }
+
+    /// Chrome-initiated enter via the video element's WebKit presentation API.
+    /// Used when the private `_togglePictureInPicture` call did not take.
+    /// Returns a short status string for the caller.
+    static let enterJS = """
+    (function () {
+      var videos = document.querySelectorAll('video');
+      var best = null, area = 0;
+      for (var i = 0; i < videos.length; i++) {
+        var v = videos[i];
+        if (v.paused || v.ended || v.readyState < 2) continue;
+        var box = v.getBoundingClientRect();
+        if (box.width * box.height >= area) { area = box.width * box.height; best = v; }
+      }
+      if (!best) return 'none';
+      if (document.pictureInPictureElement === best
+          || best.webkitPresentationMode === 'picture-in-picture') return 'already';
+      try {
+        if (typeof best.webkitSetPresentationMode === 'function') {
+          best.webkitSetPresentationMode('picture-in-picture');
+          return best.webkitPresentationMode === 'picture-in-picture' ? 'webkit' : 'webkit-called';
+        }
+      } catch (e) { return 'webkit-throw:' + (e && e.name); }
+      try {
+        if (best.requestPictureInPicture) {
+          best.requestPictureInPicture();
+          return 'request-called';
+        }
+      } catch (e) { return 'request-throw:' + (e && e.name); }
+      return 'unsupported';
+    })();
+    """
+
+    static let exitJS = """
+    (function () {
+      var v = document.pictureInPictureElement
+        || document.querySelector('video[webkitpresentationmode="picture-in-picture"]')
+        || document.querySelector('video');
+      if (!v) return 'none';
+      try {
+        if (typeof v.webkitSetPresentationMode === 'function'
+            && v.webkitPresentationMode === 'picture-in-picture') {
+          v.webkitSetPresentationMode('inline');
+          return 'webkit';
+        }
+      } catch (e) {}
+      try {
+        if (document.pictureInPictureElement && document.exitPictureInPicture) {
+          document.exitPictureInPicture();
+          return 'exit';
+        }
+      } catch (e) {}
+      return 'none';
+    })();
+    """
+
+    static let statusJS = """
+    (function () {
+      var v = document.querySelector('video');
+      var mode = v && v.webkitPresentationMode;
+      return !!(document.pictureInPictureElement || mode === 'picture-in-picture');
+    })();
+    """
 }
