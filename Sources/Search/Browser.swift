@@ -1548,7 +1548,28 @@ final class Browser: NSObject, ObservableObject {
         guard let id = floating, let tab = tabs.first(where: { $0.id == id }) else { return }
         floating = nil
         tab.floating = false
-        tab.web.evaluateInSearch(Isolate.off)
+        // Undo the fill-the-window CSS only once the stage has the page again.
+        // Same-turn teardown left YouTube laying the video out in a half-built
+        // viewport — small, then climbing to the player (the jerk on the way out).
+        DispatchQueue.main.async { [weak self] in
+            self?.endFloatIsolation(on: tab)
+        }
+    }
+
+    /// Tears down `Isolate` after the stage has reclaimed the page and painted
+    /// it filled once. Same-turn teardown left YouTube rebuilding from a short
+    /// frame (about 240pt tall) up to the player — the jerk on the way out.
+    private func endFloatIsolation(on tab: Tab, tries: Int = 0) {
+        if tab.web.superview == nil, tries < 12 {
+            DispatchQueue.main.async { [weak self] in
+                self?.endFloatIsolation(on: tab, tries: tries + 1)
+            }
+            return
+        }
+        tab.web.layoutSubtreeIfNeeded()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            tab.web.evaluateInSearch(Isolate.off)
+        }
     }
 
     func prepare(_ tab: Tab) {
