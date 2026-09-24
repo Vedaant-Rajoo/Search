@@ -111,6 +111,10 @@ enum Web {
         config.mediaTypesRequiringUserActionForPlayback = .audio
         if Store.testing, !Store.measuring { config.preferences.inactiveSchedulingPolicy = .none }
         inspector(config.preferences)
+        // Same private preference Safari flips so a video may enter the
+        // system's picture-in-picture. Without it, `_togglePictureInPicture`
+        // is present but refuses. Asked by name first (see Pip.swift).
+        Pip.allow(on: config.preferences)
         return config
     }
 

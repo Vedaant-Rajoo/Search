@@ -1496,7 +1496,7 @@ final class Browser: NSObject, ObservableObject {
 
     func appLeft() {
         guard prefs.floatsAway, Browser.front == nil || Browser.front === self else { return }
-        liftedAway = !floater.showing
+        liftedAway = !floater.showing && !nativePipActive
         lift(active, quietly: true)
     }
 
@@ -1508,23 +1508,35 @@ final class Browser: NSObject, ObservableObject {
 
     /// ⌘⇧P, for lifting one out by hand.
     func toggleFloat() {
-        if floater.showing {
+        if floater.showing || nativePipActive {
             land()
             return
         }
         lift(active, quietly: false)
     }
 
-    /// Everything but the video goes out of the way, and the page it lives in
-    /// moves house — into a small window that stays above everything.
+    /// System PiP is up for the tracked tab (page still in the stage).
+    private var nativePipActive: Bool {
+        guard let id = floating, let tab = tabs.first(where: { $0.id == id }),
+              !tab.floating, let built = tab.built else { return false }
+        return Pip.active(on: built)
+    }
+
+    /// Prefer WebKit's own picture-in-picture when the selectors are there and
+    /// a video can toggle; otherwise Float moves the page (see Float.swift).
     private func lift(_ tab: Tab?, quietly: Bool) {
         // A tab just put down with ⌘W has no page to lift a video out of, and
         // asking it would only build an empty view to ask.
-        guard let tab, !tab.isBlank, !tab.asleep, !floater.showing else { return }
+        guard let tab, !tab.isBlank, !tab.asleep, !floater.showing, !nativePipActive else { return }
         // On its own, only from a site whose video is the point of the site.
         // A hero background on a studio's home page is a video too, and it
         // followed people around the desktop. ⌘⇧P still lifts from anywhere.
         if quietly, !Players.knows(tab.address) { return }
+        if Pip.available, Pip.toggle(on: tab.web) {
+            // Page stays in the stage — do not set tab.floating.
+            floating = tab.id
+            return
+        }
         tab.web.evaluateInSearch(Isolate.on) { [weak self] answer in
             MainActor.assumeIsolated {
                 guard let self else { return }
@@ -1546,8 +1558,13 @@ final class Browser: NSObject, ObservableObject {
         // is how a little window outlives the thing that opened it.
         if floater.showing { floater.drop() }
         guard let id = floating, let tab = tabs.first(where: { $0.id == id }) else { return }
+        let wasNative = !tab.floating
         floating = nil
         tab.floating = false
+        if wasNative, let built = tab.built {
+            Pip.exit(on: built)
+            return
+        }
         tab.web.evaluateInSearch(Isolate.off)
     }
 
