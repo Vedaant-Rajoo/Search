@@ -109,7 +109,10 @@ final class Float {
         ]
         panel.minSize = NSSize(width: 260, height: 146)
 
-        let ground = NSView(frame: NSRect(origin: .zero, size: size))
+        // Same size as the panel from the first frame. Seeding the default
+        // 440×247 here, then letting AppKit grow the content view to `spot`,
+        // left the page a beat behind the black ground — the jerk on enter.
+        let ground = NSView(frame: NSRect(origin: .zero, size: spot.size))
         ground.wantsLayer = true
         ground.layer?.backgroundColor = NSColor.black.cgColor
         ground.layer?.cornerRadius = 14
