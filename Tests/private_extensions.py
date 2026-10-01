@@ -62,12 +62,13 @@ def install(folder):
     raise RuntimeError(f"the extension never loaded: {state}")
 
 
-def marks(id, name, want):
+def marks(id, name, want, tries=10):
     """[title, content script's mark, page script's mark] once the page named
     is there — tried again a few times: WebKit compiles an extension's
     blocking rules after it has loaded, and adds them to the pages' controllers
-    a moment later."""
-    for _ in range(10):
+    a moment later. Once only where nothing is expected, so a page that still
+    got the extension right after the switch went off isn't hidden by the next."""
+    for _ in range(tries):
         sv.cmd({"do": "wait", "id": id, "seconds": 10})
         got = sv.ev(id, MARKS)
         if got == [name] + want: return got
@@ -75,9 +76,9 @@ def marks(id, name, want):
     return got
 
 
-def opened(private, name, want):
+def opened(private, name, want, tries=10):
     tab = sv.cmd({"do": "open", "url": f"{BASE}/{name}", "private": private})
-    return tab, marks(tab["id"], name, want)
+    return tab, marks(tab["id"], name, want, tries)
 
 
 SCRIPTED = ["yes", None]   # the extension's script ran, the page's own was blocked
@@ -102,10 +103,12 @@ def main():
             # Off: the private tabs still open lose it; a new one isn't attached at all.
             sv.cmd({"do": "ui", "extprivate": False})
             sv.cmd({"do": "go", "id": tab["id"], "url": f"{BASE}/again"})
-            got = marks(tab["id"], "again", BARE)
+            got = marks(tab["id"], "again", BARE, tries=1)
             t.ok("switched off, the open private tab's next page gets neither", got == ["again"] + BARE, got)
-            tab, got = opened(True, "fresh", BARE)
+            tab, got = opened(True, "fresh", BARE, tries=1)
             t.ok("switched off, a new private tab carries no extensions", not tab["extensions"] and got == ["fresh"] + BARE, (tab["extensions"], got))
+            _, got = opened(False, "ordinary", SCRIPTED)
+            t.ok("switched off, an ordinary tab keeps both", got == ["ordinary"] + SCRIPTED, got)
             # On again, with the extension loaded all along: the running one is let in.
             sv.cmd({"do": "ui", "extprivate": True})
             tab, got = opened(True, "back", SCRIPTED)
