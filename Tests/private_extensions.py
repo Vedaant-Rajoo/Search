@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""Extensions on private tabs (#508), in a hidden probe.
+
+Build first (`./build.sh`), then `python3 Tests/private_extensions.py`. A
+private tab's page is on a store that keeps nothing, and WebKit keeps an
+extension's content scripts and blocking rules out of such a page unless
+the extension is let in (WKWebExtensionContext.hasAccessToPrivateData).
+Settings › Extensions › Allow on private tabs is that consent: checked here
+at load, and when the switch is turned off and on again while the extension
+is running. Both of WebKit's gates are tried — a content script, and a
+declarativeNetRequest rule, which is what uBlock Origin Lite blocks with.
+"""
+import json
+import sys
+import tempfile
+import threading
+import time
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import split_view as sv  # noqa: E402
+
+# Its own world, apart from the split suite's in this checkout (see use()):
+# an installed extension and its own extensions.private default.
+sv.use("private-extensions")
+
+# The smallest extension that leaves two marks: a content script, run before
+# the page's own, that writes an attribute on <html>; and a rule that blocks
+# the page's own script, which would write another.
+MANIFEST = {
+    "manifest_version": 3, "name": "Marker", "version": "1.0", "description": "Leaves a mark on every page.",
+    "permissions": ["declarativeNetRequest"],
+    "content_scripts": [{"matches": ["http://*/*"], "js": ["mark.js"], "run_at": "document_start"}],
+    "declarative_net_request": {"rule_resources": [{"id": "block", "enabled": True, "path": "rules.json"}]},
+}
+RULES = [{"id": 1, "priority": 1, "action": {"type": "block"}, "condition": {"urlFilter": "blocked.js", "resourceTypes": ["script"]}}]
+
+
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/blocked.js":
+            kind, body = "text/javascript", b"document.documentElement.setAttribute('data-script', 'ran')"
+        else:
+            kind = "text/html"
+            body = f"<!doctype html><title>{self.path.strip('/')}</title><script src='/blocked.js'></script><p>{self.path}".encode()
+        self.send_response(200); self.send_header("Content-Type", kind); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+    def log_message(self, *a): pass
+
+
+srv = ThreadingHTTPServer(("127.0.0.1", 0), H); threading.Thread(target=srv.serve_forever, daemon=True).start()
+BASE = f"http://127.0.0.1:{srv.server_port}"
+MARKS = "[document.title, document.documentElement.getAttribute('data-marked'), document.documentElement.getAttribute('data-script')]"
+
+
+def install(folder):
+    sv.cmd({"do": "ext-folder", "path": folder, "yes": True})
+    for _ in range(100):
+        state = sv.cmd({"do": "extensions"})
+        if any(e["loaded"] for e in state["extensions"]): return state["extensions"]
+        time.sleep(0.2)
+    raise RuntimeError(f"the extension never loaded: {state}")
+
+
+def marks(id, name, want):
+    """[title, content script's mark, page script's mark] once the page named
+    is there — tried again a few times: WebKit compiles an extension's
+    blocking rules after it has loaded, and adds them to the pages' controllers
+    a moment later."""
+    for _ in range(10):
+        sv.cmd({"do": "wait", "id": id, "seconds": 10})
+        got = sv.ev(id, MARKS)
+        if got == [name] + want: return got
+        time.sleep(0.3); sv.cmd({"do": "go", "id": id, "url": f"{BASE}/{name}"})
+    return got
+
+
+def opened(private, name, want):
+    tab = sv.cmd({"do": "open", "url": f"{BASE}/{name}", "private": private})
+    return tab, marks(tab["id"], name, want)
+
+
+SCRIPTED = ["yes", None]   # the extension's script ran, the page's own was blocked
+BARE = [None, "ran"]       # no extension on the page: no mark, nothing blocked
+
+
+def main():
+    t = sv.T()
+    with tempfile.TemporaryDirectory() as folder:
+        Path(folder, "manifest.json").write_text(json.dumps(MANIFEST))
+        Path(folder, "mark.js").write_text("document.documentElement.setAttribute('data-marked', 'yes')")
+        Path(folder, "rules.json").write_text(json.dumps(RULES))
+        try:
+            sv.setup(**{"extensions.private": True}); sv.launch()
+            loaded = install(folder)
+            t.ok("the marker extension is loaded", any(e["name"] == "Marker" and not e["errors"] for e in loaded), loaded)
+            tab, got = opened(False, "plain", SCRIPTED)
+            t.ok("an ordinary tab: its script runs, its rule blocks", got == ["plain"] + SCRIPTED, got)
+            tab, got = opened(True, "private", SCRIPTED)
+            t.ok("a private tab carries the extensions", tab["shy"] and tab["extensions"], tab)
+            t.ok("…and there too, the switch on at launch", got == ["private"] + SCRIPTED, got)
+            # Off: the private tabs still open lose it; a new one isn't attached at all.
+            sv.cmd({"do": "ui", "extprivate": False})
+            sv.cmd({"do": "go", "id": tab["id"], "url": f"{BASE}/again"})
+            got = marks(tab["id"], "again", BARE)
+            t.ok("switched off, the open private tab's next page gets neither", got == ["again"] + BARE, got)
+            tab, got = opened(True, "fresh", BARE)
+            t.ok("switched off, a new private tab carries no extensions", not tab["extensions"] and got == ["fresh"] + BARE, (tab["extensions"], got))
+            # On again, with the extension loaded all along: the running one is let in.
+            sv.cmd({"do": "ui", "extprivate": True})
+            tab, got = opened(True, "back", SCRIPTED)
+            t.ok("switched on while running, a new private tab gets both", got == ["back"] + SCRIPTED, got)
+            tab, got = opened(False, "still", SCRIPTED)
+            t.ok("an ordinary tab is as it was", got == ["still"] + SCRIPTED, got)
+        finally:
+            t.done(); sv.finish()
+    sys.exit(1 if t.failed else 0)
+
+
+if __name__ == "__main__":
+    main()
