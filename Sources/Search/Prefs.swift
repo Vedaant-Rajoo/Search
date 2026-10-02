@@ -150,7 +150,7 @@ final class Preferences: ObservableObject {
             store.set(extensionsInPrivate, forKey: "extensions.private")
             if #available(macOS 15.4, *) {
                 for context in Extensions.shared.contexts.values {
-                    context.hasAccessToPrivateData = extensionsInPrivate
+                    context.hasAccessToPrivateData = Extensions.mayGoPrivate(context.webExtension)
                 }
             }
         }
