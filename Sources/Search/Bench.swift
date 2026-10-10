@@ -2327,7 +2327,6 @@ final class Bench {
             if let on = request["spaces"] as? Bool { browser.prefs.usesSpaces = on }
             if let on = request["hides"] as? Bool { browser.prefs.sideHides = on }
             if let on = request["folded"] as? Bool { browser.folded = on }
-            if let on = request["extprivate"] as? Bool, Store.testing { browser.prefs.extensionsInPrivate = on }
             // The window's own full screen as the chrome sees it, without
             // the window going there: a test run never takes the screen.
             if let on = request["fullscreen"] as? Bool, Store.testing { browser.fullScreen = on }
@@ -2348,7 +2347,7 @@ final class Bench {
             if #available(macOS 15.4, *), let on = request["extensions"] as? Bool { Extensions.shared.menuOpen = on }
             answer(["ok": true])
 
-        case "extensions", "ext-add", "ext-folder", "ext-press", "ext-remove", "ext-reload", "ext-page", "ext-popup", "ext-menu", "ext-pin", "ext-shot", "ext-answer", "ext-enable", "capture", "capture-stop":
+        case "extensions", "ext-add", "ext-folder", "ext-press", "ext-remove", "ext-reload", "ext-page", "ext-popup", "ext-menu", "ext-pin", "ext-shot", "ext-answer", "ext-enable", "ext-private", "capture", "capture-stop":
             guard #available(macOS 15.4, *) else {
                 answer(["error": "extensions need macOS 15.4"])
                 return
@@ -2744,10 +2743,10 @@ final class Bench {
         case "extensions":
             answer(["busy": extensions.busy ?? "", "extensions": extensions.installed.map { item -> [String: Any] in
                 let context = extensions.contexts[item.id]
-                let action = context?.action(for: extensions.activeAdapter)
+                let action = context.flatMap { $0.action(for: extensions.activeAdapter(for: $0)) }
                 return [
                     "id": item.id, "name": item.name, "version": item.version, "enabled": item.enabled,
-                    "loaded": context != nil,
+                    "loaded": context != nil, "private": context?.hasAccessToPrivateData ?? false,
                     "base": context?.baseURL.absoluteString ?? "",
                     "errors": (context?.errors ?? []).map { error in
                         let e = error as NSError
@@ -2776,6 +2775,15 @@ final class Bench {
             guard let id = request["id"] as? String else { answer(["error": "ext-enable needs an id"]); return }
             extensions.setEnabled(id, request["on"] as? Bool ?? true)
             answer(["enabled": request["on"] as? Bool ?? true])
+        case "ext-private":
+            guard Store.testing else { answer(["error": "only in a test run"]); return }
+            guard let id = request["id"] as? String, let on = request["on"] as? NSNumber,
+                  CFGetTypeID(on) == CFBooleanGetTypeID(),
+                  let context = extensions.contexts[id] else {
+                answer(["error": "ext-private needs a loaded extension id and on or off"]); return
+            }
+            extensions.setPrivate(id, on.boolValue)
+            answer(["private": context.hasAccessToPrivateData])
         case "capture":
             // Extensions' screen recording: ids given, what is recording, who
             // may, and the last request with its answer.

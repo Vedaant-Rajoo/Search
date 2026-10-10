@@ -76,15 +76,6 @@ struct ExtensionsPage: View {
                     }
                 }
 
-                Card {
-                    Line("Allow on private tabs", "Off by default - a private tab keeps nothing, extensions included") {
-                        Switch(on: Binding(
-                            get: { browser.prefs.extensionsInPrivate },
-                            set: { browser.prefs.extensionsInPrivate = $0 }
-                        ))
-                    }
-                }
-
                 if extensions.installed.isEmpty {
                     Card { Nothing("No extensions yet.") }
                 } else {
@@ -94,6 +85,10 @@ struct ExtensionsPage: View {
                             Row(item: item, extensions: extensions)
                         }
                     }
+                    Text("Private access is off for each extension until you allow it. Extensions' tab lists do not mark these tabs private; allowed extensions may save their addresses or activity.")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Palette.muted)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 Recorders()
@@ -162,27 +157,59 @@ struct ExtensionsPage: View {
                         .foregroundStyle(Palette.muted)
                         .lineLimit(1)
                         .help(item.source ?? "")
+                    if context?.hasAccessToPrivateData == true {
+                        Text("Private access allowed")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(Palette.muted)
+                    }
                 }
                 Spacer(minLength: 8)
-                if hovering {
-                    Quick(item.pinned == true ? "Unpin" : "Pin to Toolbar") {
+                Menu {
+                    Button(item.pinned == true ? "Unpin" : "Pin to Toolbar") {
                         extensions.setPinned(item.id, !(item.pinned ?? false))
                     }
                     if context?.overrideNewTabPageURL != nil {
                         let on = Store.settings.object(forKey: "extensions.newtab.\(item.id)") as? Bool == true
-                        Quick(on ? "Stop in New Tabs" : "Show in New Tabs") {
+                        Button(on ? "Stop in New Tabs" : "Show in New Tabs") {
                             Store.settings.set(!on, forKey: "extensions.newtab.\(item.id)")
                             extensions.objectWillChange.send()
                         }
                     }
                     if item.source != nil || !item.fromStore {
-                        Quick("Reload") { extensions.reload(item.id) }
+                        Button("Reload") { extensions.reload(item.id) }
                     }
                     if context?.optionsPageURL != nil {
-                        Quick("Options") { extensions.openOptions(item.id) }
+                        Button("Options") { extensions.openOptions(item.id) }
                     }
-                    Quick("Remove", tint: .red.opacity(0.75)) { extensions.remove(item.id) }
+                    Divider()
+                    if let context {
+                        if (context.webExtension.manifest["incognito"] as? String) == "not_allowed" {
+                            Text("Private tabs aren’t supported")
+                        } else {
+                            Toggle("Allow in private tabs", isOn: Binding(
+                                get: { context.hasAccessToPrivateData },
+                                set: { extensions.setPrivate(item.id, $0) }
+                            ))
+                            .accessibilityLabel("Allow \(item.name) in private tabs")
+                            .help("Reopen private tabs made before any extension was allowed. Turning this off blocks further access; already-running scripts stop when the page reloads.")
+                        }
+                    } else {
+                        Text(item.enabled ? "Private access unavailable" : "Enable to change private access")
+                    }
+                    Divider()
+                    Button("Remove", role: .destructive) { extensions.remove(item.id) }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Palette.muted)
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
                 }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .accessibilityLabel("Options for \(item.name)")
+                .help("Extension options")
                 Switch(on: Binding(get: { item.enabled }, set: { extensions.setEnabled(item.id, $0) }))
             }
             .padding(.horizontal, 14)

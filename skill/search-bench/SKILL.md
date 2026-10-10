@@ -95,11 +95,11 @@ id=$(./bench --test open https://example.com)
 
 | Key | Value |
 |---|---|
-| `settings` `passwords` `welcome` `history` `downloads` `bookmarks` `hidden` `sidebar` `extensions` `extprivate` | `on` or `off` |
+| `settings` `passwords` `welcome` `history` `downloads` `bookmarks` `hidden` `sidebar` `extensions` | `on` or `off` |
 | `side` | `left` or `right` |
 | `look` | `light`, `dark`, or `system` |
 
-`extensions on` opens the puzzle-button menu. `ext-menu PATH` writes that menu to a PNG. `look`, `sidebar`, `side`, and `extprivate` (Settings › Extensions › Allow on private tabs, test only) are remembered.
+`extensions on` opens the puzzle-button menu. `ext-menu PATH` writes that menu to a PNG. `look`, `sidebar`, and `side` are remembered.
 
 `resize WIDTH HEIGHT [STEPS]` (test only) drags the window to that size and returns the size and traffic-light positions. `key ID TEXT` (test only) sends real key events to a tab and returns how many the page did not use. `sleep ID` tries to sleep a tab now and reports the reason it stayed awake. A bench tab stays awake.
 
@@ -115,6 +115,8 @@ Needs macOS 15.4 or later. Do this on a test world. Ids here are extension ids f
 ```
 
 Poll `extensions` until `busy` is `""`. Then read `loaded`, `errors`, and `reported` for that id.
+
+`ext-private ID on|off` (test only) changes one loaded extension's private-tab consent. `extensions` reports its effective `private` permission. Each extension starts off; `incognito: not_allowed` always stays off. Removal clears consent. Reopen private tabs created before any extension was allowed; turning consent off blocks further access to open private tabs, but already-running page scripts stop on reload.
 
 `ext-press ID` opens its popup. While that popup is the one open, `ext-popup ID JS` runs JavaScript in it and `ext-shot ID PATH` writes a PNG. `ext-page ID [PATH]` opens one of its own pages in a bench tab, prints that tab id, and `eval` there runs with the extension's APIs. `ext-reload ID` loads it again. A folder extension is copied in fresh. `ext-pin ID [on|off]`, `ext-enable ID on|off`, and `ext-remove ID` change that world. `ext-answer yes|no|ask` (test only) answers later permission questions and lists what was asked.
 

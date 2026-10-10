@@ -91,11 +91,15 @@ enum Web {
         config.processPool = Web.pool
         // A test run's pretend camera and microphone (see ExtensionCapture).
         if #available(macOS 15.4, *), Store.testing { ExtensionCapture.mockDevices(config.preferences) }
-        // Chrome extensions see every page but a private one, unless Settings
-        // › Extensions says they may. The controller has to be there when the
-        // view is made; it can't be added after.
-        if #available(macOS 15.4, *), !shy || Store.settings.bool(forKey: "extensions.private") {
-            MainActor.assumeIsolated { Extensions.attach(config) }
+        // A private view needs a controller only when some extension is
+        // allowed in. WebKit gates each extension separately. A view made
+        // without the controller cannot acquire one later.
+        if #available(macOS 15.4, *) {
+            MainActor.assumeIsolated {
+                if !shy || Extensions.shared.contexts.values.contains(where: { $0.hasAccessToPrivateData }) {
+                    Extensions.attach(config)
+                }
+            }
         }
         // Left alone, WKWebView says only "AppleWebKit … (KHTML, like Gecko)" —
         // no browser, no version. Google reads that as something it doesn't

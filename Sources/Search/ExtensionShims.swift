@@ -3315,16 +3315,16 @@ enum ExtensionShims {
     /// extensions see it, and `w`, that window's frame from windows.getAll()
     /// (see Extensions.tab(windowFrame:index:)). A bare number, or no frame,
     /// is only understood while there is one window.
-    private static func located(_ place: Any?, owner: Extensions) -> Tab? {
+    private static func located(_ place: Any?, context: WKWebExtensionContext, owner: Extensions) -> Tab? {
         let spec = place as? [String: Any]
         guard let index = (place as? NSNumber)?.intValue ?? (spec?["i"] as? NSNumber)?.intValue else { return nil }
         let number = { (value: Any?) in (value as? NSNumber)?.doubleValue }
         if let w = spec?["w"] as? [String: Any], let left = number(w["left"]), let top = number(w["top"]),
            let width = number(w["width"]), let height = number(w["height"]) {
-            return owner.tab(windowFrame: CGRect(x: left, y: top, width: width, height: height), index: index)
+            return owner.tab(windowFrame: CGRect(x: left, y: top, width: width, height: height), index: index, for: context)
         }
         guard Browsers.all.count <= 1 else { return nil }
-        let visible = owner.visibleTabs
+        let visible = owner.visibleTabs(for: context)
         return visible.indices.contains(index) ? visible[index] : nil
     }
 
@@ -3497,7 +3497,8 @@ enum ExtensionShims {
         case "downloads.download":
             let spec = first as? [String: Any] ?? [:]
             guard let url = (spec["url"] as? String).flatMap(URL.init(string:)) else { throw Unsupported(what: "No url to download") }
-            guard let web = browser.active?.built ?? browser.tabs.lazy.compactMap(\.built).first else {
+            let tab = browser.active?.built != nil ? browser.active : browser.tabs.first { $0.built != nil }
+            guard let tab, owner.seen(tab, for: context), let web = tab.built else {
                 throw Unsupported(what: "No page to download through")
             }
             if let name = spec["filename"] as? String, !name.isEmpty {
@@ -3741,7 +3742,7 @@ enum ExtensionShims {
         case "clients.pages":
             var pages: [[String: Any]] = []
             if let popup = ExtensionPopup.shared.client(of: id) { pages.append(popup) }
-            for tab in browser.tabs {
+            for tab in browser.tabs where owner.seen(tab, for: context) {
                 guard let web = tab.built, let url = web.url, Browser.extensionHost(of: url) == id else { continue }
                 let shown = tab.id == browser.activeID && web.window?.occlusionState.contains(.visible) == true
                 pages.append(["id": tab.id.uuidString, "url": url.absoluteString, "visible": shown, "focused": shown && web.window?.isKeyWindow == true])
@@ -3754,8 +3755,9 @@ enum ExtensionShims {
         case "action.popup":
             let path = first as? String ?? ""
             let index = args.dropFirst().first as? Int ?? -1
-            if index >= 0, owner.visibleTabs.indices.contains(index) {
-                popups[id, default: [:]][owner.visibleTabs[index].id.uuidString] = path
+            let visible = owner.visibleTabs(for: context)
+            if index >= 0, visible.indices.contains(index) {
+                popups[id, default: [:]][visible[index].id.uuidString] = path
             } else {
                 popups[id, default: [:]]["*"] = path
                 popups[id] = popups[id]?.filter { $0.key == "*" }
@@ -3860,10 +3862,7 @@ enum ExtensionShims {
         case "tabs.describe":
             let places: [Any] = first as? [Any] ?? []
             return places.map { place -> Any in
-                guard let tab = located(place, owner: owner) else { return NSNull() }
-                // A private tab stays blank to an extension not let into
-                // them, as WebKit is told (see ExtensionTab.hidden).
-                if tab.shy, !context.hasAccessToPrivateData { return ["url": "", "title": ""] }
+                guard let tab = located(place, context: context, owner: owner) else { return NSNull() }
                 // Another extension's page stays blank, as WebKit keeps it
                 // (see the refusal in Extensions.load); its own are its own.
                 if let url = tab.address, let scheme = url.scheme?.lowercased(),
@@ -3875,8 +3874,8 @@ enum ExtensionShims {
                 return described
             }
         case "tabs.move", "tabs.discard", "tabs.activate":
-            guard let tab = located(first, owner: owner), let browser = owner.browser(of: tab) else { throw Unsupported(what: "No tab there") }
-            let visible = owner.visibleTabs(of: browser)
+            guard let tab = located(first, context: context, owner: owner), let browser = owner.browser(of: tab) else { throw Unsupported(what: "No tab there") }
+            let visible = owner.visibleTabs(of: browser, for: context)
             switch api {
             case "tabs.move":
                 let wanted = args.dropFirst().first as? Int ?? -1
@@ -3897,7 +3896,9 @@ enum ExtensionShims {
             guard let url = browser.searchURL(for: spec["text"] as? String ?? "") else { return nil }
             switch spec["disposition"] as? String {
             case "NEW_TAB", "NEW_WINDOW": browser.open(url, foreground: true)
-            default: browser.visit(url)
+            default:
+                guard browser.active.map({ owner.seen($0, for: context) }) ?? true else { throw Unsupported(what: "No tab there") }
+                browser.visit(url)
             }
             return nil
 
@@ -4010,7 +4011,7 @@ enum ExtensionShims {
         case "tabs.groups":
             let places: [Any] = first as? [Any] ?? []
             return places.map { place -> Int in
-                guard browser.prefs.usesTabGroups, let tab = located(place, owner: owner),
+                guard browser.prefs.usesTabGroups, let tab = located(place, context: context, owner: owner),
                       let home = owner.browser(of: tab), let group = home.group(of: tab) else { return -1 }
                 return TabGroup.number(group)
             }
@@ -4034,7 +4035,7 @@ enum ExtensionShims {
         case "tabs.group":
             guard browser.prefs.usesTabGroups else { throw Unsupported(what: "Tab groups are off in Search's settings") }
             let places: [Any] = first as? [Any] ?? []
-            let tabs = places.compactMap { located($0, owner: owner) }
+            let tabs = places.compactMap { located($0, context: context, owner: owner) }
             guard !tabs.isEmpty else { throw Unsupported(what: "No tabs to group") }
             // A group is one window's, as in Chrome.
             guard let browser = owner.browser(of: tabs[0]), tabs.allSatisfy({ owner.browser(of: $0) === browser }) else {
@@ -4057,7 +4058,7 @@ enum ExtensionShims {
         case "tabs.ungroup":
             guard browser.prefs.usesTabGroups else { return nil }
             let places: [Any] = first as? [Any] ?? []
-            for tab in places.compactMap({ located($0, owner: owner) }) {
+            for tab in places.compactMap({ located($0, context: context, owner: owner) }) {
                 owner.browser(of: tab)?.move(tab, toGroup: nil)
             }
             return nil
