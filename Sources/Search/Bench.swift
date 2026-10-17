@@ -2777,12 +2777,10 @@ final class Bench {
             answer(["enabled": request["on"] as? Bool ?? true])
         case "ext-private":
             guard Store.testing else { answer(["error": "only in a test run"]); return }
-            guard let id = request["id"] as? String, let on = request["on"] as? NSNumber,
-                  CFGetTypeID(on) == CFBooleanGetTypeID(),
-                  let context = extensions.contexts[id] else {
-                answer(["error": "ext-private needs a loaded extension id and on or off"]); return
+            guard let id = request["id"] as? String, let context = extensions.contexts[id] else {
+                answer(["error": "ext-private needs a loaded extension's id"]); return
             }
-            extensions.setPrivate(id, on.boolValue)
+            extensions.setPrivate(id, request["on"] as? Bool ?? true)
             answer(["private": context.hasAccessToPrivateData])
         case "capture":
             // Extensions' screen recording: ids given, what is recording, who

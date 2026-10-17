@@ -2229,14 +2229,42 @@ enum ExtensionShims {
         const permissions = (() => { try { return runtime.getManifest().permissions || []; } catch (e) { return []; } })();
         const seesTabs = permissions.includes("tabs"), seesGroups = permissions.includes("tabGroups");
         const isTab = (t) => t && typeof t === "object" && typeof t.id === "number";
+        // A private tab reads incognito: true, as in Chrome, to an extension
+        // let into private tabs; no other sees one. WebKit takes privacy from
+        // a tab's window, and a window here holds both kinds, so the browser
+        // is asked the first time a tab comes by: whether this extension sees
+        // any private tab, then, only if it does, which of these are, by their
+        // places. "Not private" is kept only from the first answer, as a
+        // place can change while the second is out.
+        const privacy = new Map();
+        const ask = async (tabs) => {
+          if (privacy.size > 1000) privacy.clear();
+          try {
+            if (!(await native("tabs.private", []))) { for (const t of tabs) privacy.set(t.id, false); return; }
+            const known = await frames();
+            const answers = await native("tabs.private", [tabs.map((t) => placeOf(t, known))]);
+            tabs.forEach((t, i) => {
+              if (!answers || answers[i] !== true) return;
+              privacy.set(t.id, true);
+              try { t.incognito = true; } catch (e) {}
+            });
+          } catch (e) {}
+        };
         // Mends in place; a promise only when the browser has to be asked.
-        const mend = (list) => {
+        // `quick`: a click's own event, which waiting for privacy would cost
+        // the click, so it waits only if it has to wait anyway.
+        const mend = (list, quick) => {
           const tabs = list.filter(isTab);
-          for (const t of tabs) if (t.groupId === undefined) try { t.groupId = -1; } catch (e) {}
+          for (const t of tabs) {
+            if (t.groupId === undefined) try { t.groupId = -1; } catch (e) {}
+            if (privacy.get(t.id)) try { t.incognito = true; } catch (e) {}
+          }
           const blind = seesTabs ? tabs.filter((t) => !t.url && t.index >= 0) : [];
           const placed = seesGroups ? tabs.filter((t) => t.index >= 0) : [];
-          if (!blind.length && !placed.length) return null;
-          return frames().then((known) => Promise.all([
+          const unsure = quick && !blind.length && !placed.length ? [] : tabs.filter((t) => t.index >= 0 && !privacy.has(t.id));
+          const asked = unsure.length ? ask(unsure) : null;
+          if (!blind.length && !placed.length) return asked;
+          return Promise.all([asked, frames().then((known) => Promise.all([
             blind.length && native("tabs.describe", [blind.map((t) => placeOf(t, known))]).then((info) => {
               blind.forEach((t, i) => {
                 const d = info && info[i];
@@ -2253,10 +2281,12 @@ enum ExtensionShims {
                 if (ids && typeof ids[i] === "number") try { t.groupId = ids[i]; } catch (e) {}
               });
             }, () => {}),
-          ]));
+          ]))]);
         };
+        // A window's tabs, when it came with them; never the window, which
+        // has a numeric id too but no place in a row.
         const tabsIn = (value) => Array.isArray(value) ? value.flatMap(tabsIn)
-          : isTab(value) ? [value] : value && Array.isArray(value.tabs) ? value.tabs : [];
+          : value && Array.isArray(value.tabs) ? value.tabs : isTab(value) && typeof value.index === "number" ? [value] : [];
         const mendResult = (target, name) => {
           if (!target || typeof target[name] !== "function") return;
           const original = target[name].bind(target);
@@ -2314,8 +2344,12 @@ enum ExtensionShims {
             p.then((window) => callback(window), (error) => withLastError(error, callback));
           });
         }
-        // Listeners given a tab: the tab is mended before they see it.
-        const mendArgs = (target, positions, told, skip) => {
+        // Listeners given a tab: the tab is mended before they see it. An
+        // event held for that holds back the ones after it, so they still
+        // arrive in WebKit's order; a new tab's onActivated used to beat its
+        // onCreated. A click's own event (`quick`) never waits in line.
+        let held = null;
+        const mendArgs = (target, positions, told, skip, quick) => {
           if (!target || typeof target.addListener !== "function") return;
           const add = target.addListener.bind(target), remove = target.removeListener.bind(target);
           const wrapped = new Map();
@@ -2323,9 +2357,13 @@ enum ExtensionShims {
             const state = new Map();
             const w = function (...args) {
               if (skip && skip(args)) return;
-              const pending = mend(positions.map((i) => args[i]));
-              if (!pending) { if (told) told(args, state); return listener.apply(this, args); }
-              pending.then(() => { if (told) told(args, state); listener.apply(this, args); });
+              const run = () => { if (told) told(args, state); return listener.apply(this, args); };
+              const pending = mend(positions.map((i) => args[i]), quick);
+              if (!pending && (quick || !held)) return run();
+              const turn = Promise.all([quick ? null : held, pending]).then(run).catch((e) => { setTimeout(() => { throw e; }); });
+              if (quick) return;
+              held = turn;
+              turn.then(() => { if (held === turn) held = null; });
             };
             wrapped.set(listener, w);
             return add(w, ...rest);
@@ -2357,10 +2395,12 @@ enum ExtensionShims {
           state.set(tab.id, { url: tab.url, title: tab.title, favIconUrl: tab.favIconUrl });
         } : null;
         mendArgs(chrome.tabs.onUpdated, [2], told);
-        mendArgs(chrome.action && chrome.action.onClicked, [0]);
-        mendArgs(chrome.contextMenus && chrome.contextMenus.onClicked, [1]);
-        mendArgs(chrome.menus && chrome.menus.onClicked, [1]);
-        mendArgs(chrome.commands && chrome.commands.onCommand, [1]);
+        // Given no tab, but in line behind the ones that are.
+        for (const name of ["onActivated", "onHighlighted", "onMoved", "onAttached", "onDetached", "onReplaced"]) mendArgs(chrome.tabs[name], []);
+        mendArgs(chrome.action && chrome.action.onClicked, [0], null, null, true);
+        mendArgs(chrome.contextMenus && chrome.contextMenus.onClicked, [1], null, null, true);
+        mendArgs(chrome.menus && chrome.menus.onClicked, [1], null, null, true);
+        mendArgs(chrome.commands && chrome.commands.onCommand, [1], null, null, true);
       }
 
       // Permissions. WebKit knows its own and throws on any other name,
@@ -3873,6 +3913,15 @@ enum ExtensionShims {
                 if let icon = favIconURL(tab) { described["favIconUrl"] = icon }
                 return described
             }
+        // Which of these places hold a private tab, for the shim's incognito
+        // (`privacy` in the script); with no places, whether this extension
+        // sees any. Only tabs it sees are found, so one not let in learns
+        // nothing.
+        case "tabs.private":
+            guard let places = first as? [Any] else {
+                return Browsers.all.contains { $0.tabs.contains { $0.shy && owner.seen($0, for: context) } }
+            }
+            return places.map { located($0, context: context, owner: owner)?.shy == true }
         case "tabs.move", "tabs.discard", "tabs.activate":
             guard let tab = located(first, context: context, owner: owner), let browser = owner.browser(of: tab) else { throw Unsupported(what: "No tab there") }
             let visible = owner.visibleTabs(of: browser, for: context)

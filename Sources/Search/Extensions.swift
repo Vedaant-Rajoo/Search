@@ -248,25 +248,28 @@ final class Extensions: NSObject, ObservableObject {
         return made
     }
 
-    /// Private tabs keep nothing and see no extensions, unless Settings ›
-    /// Extensions says they may — and then only the ones made since, which
-    /// carry the controller; one made before the switch has no page an
-    /// extension could reach.
+    /// Private tabs keep nothing and show nothing to an extension you haven't
+    /// let in (Settings › Extensions). Even to one you have, only the ones
+    /// made since some extension was let in carry the controller; one made
+    /// before has no page an extension could reach.
     private func seen(_ tab: Tab) -> Bool { !tab.shy || tab.carriesExtensions }
     func seen(_ tab: Tab, for context: WKWebExtensionContext) -> Bool {
         seen(tab) && (!tab.shy || context.hasAccessToPrivateData)
     }
 
-    /// The same list backs WebKit's indices and the shim's tab lookup.
+    /// A window's tabs as this extension sees them. WebKit's indices and the
+    /// shim's places both count in this list.
     func visibleTabs(of browser: Browser, for context: WKWebExtensionContext) -> [Tab] {
         browser.tabs.filter { seen($0, for: context) }
     }
 
+    /// The first window's: what a bare tab index means.
     func visibleTabs(for context: WKWebExtensionContext) -> [Tab] {
         Browsers.primary.map { visibleTabs(of: $0, for: context) } ?? []
     }
 
-    /// A move's old index must omit the tabs this context never saw.
+    /// Each extension's view of a row, from what WebKit has told it: a move's
+    /// old index counts only the tabs that extension knew of.
     private func visibleOrders(_ order: [Tab.ID]) -> [String: [Tab.ID]] {
         contexts.mapValues { context in
             let open = context.openTabs
@@ -399,13 +402,15 @@ final class Extensions: NSObject, ObservableObject {
             }
             watch(tab)
         }
-        // Moves: anything whose position changed among the ones that stayed.
+        // Moves: anything whose position changed among the ones that stayed,
+        // in each extension's own count.
+        let present = Set(ids)
         for context in contexts.values {
             let oldOrder = oldOrders[context.uniqueIdentifier] ?? []
-            let stayed = oldOrder.filter { ids.contains($0) }
+            let stayed = oldOrder.filter(present.contains)
             let current = visibleTabs(of: browser, for: context).map(\.id)
-            let newOrder = current.filter { stayed.contains($0) }
-            for (index, id) in stayed.enumerated() where newOrder.firstIndex(of: id) != index {
+            let kept = Set(stayed)
+            for (id, now) in zip(stayed, current.filter(kept.contains)) where id != now {
                 if let adapter = adapters[id], let oldIndex = oldOrder.firstIndex(of: id), current.firstIndex(of: id) != oldIndex {
                     context.didMoveTab(adapter, from: oldIndex, in: window(of: browser))
                 }
@@ -418,7 +423,7 @@ final class Extensions: NSObject, ObservableObject {
         let id = tab.id
         func changed(_ properties: WKWebExtension.TabChangedProperties) {
             guard let adapter = adapters[id] else { return }
-            for context in contexts.values where seen(tab, for: context) && context.openTabs.contains(adapter) {
+            for context in contexts.values where seen(tab, for: context) {
                 context.didChangeTabProperties(properties, for: adapter)
             }
         }
@@ -950,9 +955,9 @@ final class Extensions: NSObject, ObservableObject {
         }
     }
 
-    /// Allow on private tabs, unless its manifest says it must never run
-    /// there ("incognito": "not_allowed"), which Chrome honours whatever was
-    /// allowed. WebKit doesn't read that key.
+    /// You let it into private tabs, by its id and off until you do, and its
+    /// manifest doesn't refuse them ("incognito": "not_allowed"), which
+    /// Chrome honours whatever was allowed. WebKit doesn't read that key.
     static func mayGoPrivate(_ context: WKWebExtensionContext) -> Bool {
         Store.settings.bool(forKey: "extensions.private.\(context.uniqueIdentifier)")
             && (context.webExtension.manifest["incognito"] as? String) != "not_allowed"
@@ -960,13 +965,14 @@ final class Extensions: NSObject, ObservableObject {
 
     func setPrivate(_ id: String, _ on: Bool) {
         guard let context = contexts[id] else { return }
-        Store.settings.set(on && (context.webExtension.manifest["incognito"] as? String) != "not_allowed",
-                           forKey: "extensions.private.\(id)")
+        Store.settings.set(on, forKey: "extensions.private.\(id)")
         let allowed = Extensions.mayGoPrivate(context)
         guard context.hasAccessToPrivateData != allowed else { return }
         context.hasAccessToPrivateData = allowed
-        // Mixed windows defeat WebKit's private-tab cache check. Forget
-        // these IDs on revocation, including ones an extension saved earlier.
+        // WebKit takes a tab's privacy from its window, and a window here
+        // holds both kinds, so the extension is told of private tabs here:
+        // opened when it is let in, closed when it is shut out, which also
+        // ends the IDs it kept of them.
         if allowed {
             for browser in Browsers.all {
                 for tab in visibleTabs(of: browser, for: context) where tab.shy {
@@ -979,7 +985,6 @@ final class Extensions: NSObject, ObservableObject {
             }
         }
         actionsChanged += 1
-        objectWillChange.send()
     }
 
     /// Its manifest asks to talk to apps on this Mac ("nativeMessaging"),
@@ -1463,7 +1468,8 @@ final class ExtensionTab: NSObject, WKWebExtensionTab {
     private var browser: Browser? { tab.flatMap(owner.browser(of:)) }
 
     func window(for context: WKWebExtensionContext) -> (any WKWebExtensionWindow)? {
-        // Close notifications arrive after the tab leaves its window's row.
+        // WebKit asks a closed tab for its window after it has left the row,
+        // and with none, onRemoved said window -1 and the shim dropped it.
         if let browser { lastWindow = owner.window(of: browser) }
         return lastWindow
     }
@@ -1480,9 +1486,9 @@ final class ExtensionTab: NSObject, WKWebExtensionTab {
         hidden(context) || Extensions.othersPage(tab?.built?.url, for: context) || Extensions.othersPage(tab?.address, for: context)
     }
 
-    /// A private tab, to an extension not let into private tabs (the switch
-    /// off, or its manifest refusing them): blank, title included. WebKit
-    /// takes a tab's privacy from its window, and here a window holds both.
+    /// A private tab, to an extension not let into private tabs: blank, title
+    /// included, and refused anything done to it. WebKit takes a tab's
+    /// privacy from its window, and here a window holds both kinds.
     private func hidden(_ context: WKWebExtensionContext) -> Bool {
         tab?.shy == true && !context.hasAccessToPrivateData
     }
@@ -1579,8 +1585,9 @@ final class ExtensionWindow: NSObject, WKWebExtensionWindow {
     func windowType(for context: WKWebExtensionContext) -> WKWebExtension.WindowType {
         browser?.extensionPopup != nil ? .popup : .normal
     }
-    // ponytail: WebKit has only window privacy; mixed tabs need the Settings
-    // warning until a public per-tab privacy API exists.
+    /// A window here holds private tabs and others, and WebKit would take
+    /// this answer for all of them. The shim marks the private ones instead
+    /// (`privacy` in ExtensionShims), until WebKit can be told per tab.
     func isPrivate(for context: WKWebExtensionContext) -> Bool { false }
 
     func windowState(for context: WKWebExtensionContext) -> WKWebExtension.WindowState {

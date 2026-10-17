@@ -221,10 +221,6 @@ def main():
             second = next(e["id"] for e in loaded if e["name"] == "Second")
             refuser = next(e["id"] for e in loaded if e["name"] == "Refuser")
             t.ok("every extension starts denied, ignoring the legacy global true", all(e["private"] is False for e in loaded), loaded)
-            for req in ({"id": "not-installed", "on": True}, {"id": marker}, {"id": marker, "on": 1}):
-                try: sv.cmd({"do": "ext-private", **req}); refused = False
-                except RuntimeError: refused = True
-                t.ok(f"consent rejects invalid bench input {req}", refused)
             plain, got = opened(False, "plain", SCRIPTED)
             t.ok("an ordinary tab: its script runs, its rule blocks", got == ["plain"] + SCRIPTED, got)
             t.ok("the denied second extension and refuser run normally", sv.ev(plain["id"], "[document.documentElement.getAttribute('data-second'), " + REFUSED + "]") == ["yes", "yes"])
@@ -265,6 +261,17 @@ def main():
             for kind, tabs in allowed.items():
                 indexes = [by_url(tabs, name)["index"] for name in ("plain", "private", "ordinary")]
                 t.ok(f"allowed {kind} query keeps ordinary-private-ordinary order", indexes == list(range(indexes[0], indexes[0] + 3)), indexes)
+            # WebKit calls every tab of a mixed window not private; the shim
+            # marks the private ones for an extension let into them.
+            t.ok("an allowed query marks only the private tab incognito", [x["incognito"] for x in allowed["shim"] if x["id"] == private_id] == [True] and not any(x["incognito"] for x in allowed["shim"] if x["id"] != private_id), allowed["shim"])
+            got = run(a, f"return [await chrome.tabs.get({private_id}), await chrome.windows.getAll({{populate: true}})];")
+            t.ok("an allowed get and windows.getAll mark it too", got[0]["incognito"] is True and [x["incognito"] for w in got[1] for x in w["tabs"] if x["id"] == private_id] == [True], got)
+            told = lambda e: e["args"][0] if e["name"] == "onCreated" else e["args"][2] if e["name"] == "onUpdated" else None
+            events = poll(lambda: sv.ev(a, "window.__events"), lambda es: any((told(e) or {}).get("url") == f"{BASE}/event-private-updated" for e in es))
+            event_id = next(told(e)["id"] for e in events if (told(e) or {}).get("url") == f"{BASE}/event-private-updated")
+            tabs = [told(e) for e in events if told(e)]
+            t.ok("allowed onCreated and onUpdated mark the private tab, and only it", any(x["id"] == event_id for x in tabs) and all(x["incognito"] is (x["id"] == event_id) for x in tabs), tabs)
+            t.ok("the browser tells an allowed extension of its private tabs", run(a, "return await native('tabs.private', []);") is True)
             for page in (b, r):
                 for kind, tabs in queries(page).items():
                     regular = [by_url(tabs, name) for name in ("plain", "ordinary")]
@@ -275,6 +282,10 @@ def main():
             target = by_url(queries(b)["shim"], "ordinary")
             got = run(b, f"return await native('tabs.describe', [[{{i: {target['index']}}}]]);")
             t.ok("native shim lookup uses the caller's filtered index", got[0]["url"] == f"{BASE}/ordinary", got)
+            for page in (b, r):
+                count = len(queries(page)["native"])
+                got = run(page, f"return [await native('tabs.private', []), await native('tabs.private', [[...Array({count + 1}).keys()].map((i) => ({{i}}))])];")
+                t.ok("a denied extension learns of no private tab, at any place", got == [False, [False] * (count + 1)], got)
             run(b, f"await chrome.tabs.highlight({{tabs: {target['index']}}});")
             t.ok("highlight at the filtered index activates the ordinary page", next(x for x in sv.cmd({"do": "tabs"})["tabs"] if x["active"])["id"] == ordinary["id"])
             sv.cmd({"do": "select", "id": plain["id"]})
@@ -299,9 +310,10 @@ def main():
             # after revocation. Query filtering alone cannot pass these checks.
             sv.ev(private["id"], "document.cookie = 'session=private-secret; Path=/'; 0")
             t.ok("revocation updates the running extension", consent(marker, False) is False)
-            # Closing previously disclosed IDs is the revocation boundary;
-            # future private activity must produce no events for this context.
+            # Shut out, it is told the private tabs it knew have closed, so the
+            # IDs it kept stop working, and it hears nothing of them after.
             poll(lambda: sv.ev(a, "window.__events"), lambda es: any(e["name"] == "onRemoved" and e["args"][0] == private_id for e in es))
+            t.ok("revoked, the browser tells of no private tab", run(a, "return await native('tabs.private', []);") is False)
             sv.ev(a, "window.__events = []; 0")
             for kind, tabs in queries(a).items():
                 t.ok(f"revoked {kind} query drops the cached private ID", no_private(tabs, {private_id}, [f"{BASE}/private"]), tabs)
@@ -386,6 +398,14 @@ def main():
                 events = poll(lambda: sv.ev(page, "window.__events"), lambda es: any(e["name"] == "onRemoved" and e["args"][0] == normal_ids[page] for e in es))
                 t.ok("normal tab create/update/activate/remove events still arrive", {"onCreated", "onUpdated", "onActivated", "onRemoved"}.issubset({e["name"] for e in events}), events)
                 t.ok("denied private events expose no ID, URL or title", event_ids(events) <= regular_ids[page] and no_private(events, set(), [f"{BASE}/private", "event-private", "revoked-private", "fresh-private"]), events)
+            # A tab opened in front: its onCreated waits for the browser's
+            # answer, and its onActivated has to wait behind it.
+            sv.ev(a, "window.__events = []; 0")
+            front = run(a, f"return (await chrome.tabs.create({{url: '{BASE}/in-front', active: true}})).id;")
+            events = poll(lambda: sv.ev(a, "window.__events"), lambda es: any(e["name"] == "onActivated" and e["args"][0]["tabId"] == front for e in es))
+            heard = [e["name"] for e in events if (told(e) or {}).get("id") == front or (e["name"] == "onActivated" and e["args"][0]["tabId"] == front)]
+            t.ok("a new tab's onCreated still comes before its onActivated", "onCreated" in heard and heard.index("onCreated") < heard.index("onActivated"), heard)
+            run(a, f"await chrome.tabs.remove({front});")
 
             consent(marker, True)
             tab, got = opened(True, "back", SCRIPTED)

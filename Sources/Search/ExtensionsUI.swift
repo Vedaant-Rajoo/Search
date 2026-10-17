@@ -85,7 +85,7 @@ struct ExtensionsPage: View {
                             Row(item: item, extensions: extensions)
                         }
                     }
-                    Text("Private access is off for each extension until you allow it. Extensions' tab lists do not mark these tabs private; allowed extensions may save their addresses or activity.")
+                    Text("Each extension stays out of private tabs until you allow it in its … menu. One you allow can tell which tabs are private, but may still keep what you visit in them.")
                         .font(.system(size: 11.5))
                         .foregroundStyle(Palette.muted)
                         .fixedSize(horizontal: false, vertical: true)
@@ -157,11 +157,6 @@ struct ExtensionsPage: View {
                         .foregroundStyle(Palette.muted)
                         .lineLimit(1)
                         .help(item.source ?? "")
-                    if context?.hasAccessToPrivateData == true {
-                        Text("Private access allowed")
-                            .font(.system(size: 11.5))
-                            .foregroundStyle(Palette.muted)
-                    }
                 }
                 Spacer(minLength: 8)
                 Menu {
@@ -181,8 +176,8 @@ struct ExtensionsPage: View {
                     if context?.optionsPageURL != nil {
                         Button("Options") { extensions.openOptions(item.id) }
                     }
-                    Divider()
                     if let context {
+                        Divider()
                         if (context.webExtension.manifest["incognito"] as? String) == "not_allowed" {
                             Text("Private tabs aren’t supported")
                         } else {
@@ -191,10 +186,8 @@ struct ExtensionsPage: View {
                                 set: { extensions.setPrivate(item.id, $0) }
                             ))
                             .accessibilityLabel("Allow \(item.name) in private tabs")
-                            .help("Reopen private tabs made before any extension was allowed. Turning this off blocks further access; already-running scripts stop when the page reloads.")
+                            .help("Private tabs opened before any extension was allowed need reopening. Turned off, a script already running in one stops only when the page reloads.")
                         }
-                    } else {
-                        Text(item.enabled ? "Private access unavailable" : "Enable to change private access")
                     }
                     Divider()
                     Button("Remove", role: .destructive) { extensions.remove(item.id) }
@@ -230,6 +223,7 @@ struct ExtensionsPage: View {
             if context?.overrideNewTabPageURL != nil, Store.settings.object(forKey: "extensions.newtab.\(item.id)") as? Bool == true {
                 parts.append("shows in new tabs")
             }
+            if context?.hasAccessToPrivateData == true { parts.append("allowed in private tabs") }
             if let errors = context?.errors, !errors.isEmpty { parts.append("\(errors.count) warning\(errors.count == 1 ? "" : "s")") }
             return parts.joined(separator: " · ")
         }
