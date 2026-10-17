@@ -336,8 +336,12 @@ def main():
             for label, expression in calls: denied(t, a, f"cached private ID rejects {label}", expression)
             denied(t, a, "a mixed window cannot be closed around denied private tabs", f"nativeAPI('windows', 'remove', [{cached['windowId']}])")
             denied(t, a, "direct native search cannot navigate the denied active private page", "native('search.query', [{text: 'denied', disposition: 'CURRENT_TAB'}])")
-            denied(t, a, "direct native download cannot borrow the denied private session", f"native('downloads.download', [{{url: '{BASE}/download-denied', filename: 'denied.txt'}}])")
-            t.ok("denied session APIs make no HTTP request", not any(path in ("/search-denied", "/download-denied") for path, _ in REQUESTS), REQUESTS)
+            # With the private tab in front, a download goes through another
+            # of your tabs, never a private one (ExtensionShims.downloadPage).
+            run(a, f"await native('downloads.download', [{{url: '{BASE}/download-private-front', filename: 'private-front.txt'}}]);")
+            got = poll(lambda: [cookie for path, cookie in REQUESTS if path == "/download-private-front"], lambda cookies: cookies)
+            t.ok("a download with the private tab in front never carries its cookies", all("private-secret" not in cookie for cookie in got), got)
+            t.ok("denied search makes no HTTP request", not any(path == "/search-denied" for path, _ in REQUESTS), REQUESTS)
             t.ok("cached-ID mutations leave the private address intact", sv.ev(private["id"], "location.href") == f"{BASE}/private")
 
             # Normal pages still support the same APIs, including native

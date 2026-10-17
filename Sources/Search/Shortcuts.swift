@@ -34,7 +34,8 @@ struct KeyCombo: Codable, Hashable {
     init?(event: NSEvent) {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let named = KeyCombo.names[event.keyCode] ?? ContentView.digits[event.keyCode].map(String.init)
-        guard let key = named ?? event.characters(byApplyingModifiers: [])?.lowercased(), !key.isEmpty else { return nil }
+        let key = named ?? event.shortcutKey
+        guard !key.isEmpty else { return nil }
         self.init(key, command: flags.contains(.command), shift: flags.contains(.shift),
                   option: flags.contains(.option), control: flags.contains(.control))
     }
@@ -146,13 +147,14 @@ struct Command: Identifiable {
         Command("app.passwords", "Passwords…", .app, KeyCombo("l", option: true)) { $0.managing = true },
 
         Command("file.newWindow", "New Window", .file, KeyCombo("n")) { _ in Browsers.newWindow() },
-        Command("file.newTab", "New Tab", .file, KeyCombo("t")) { $0.newTab() },
+        Command("file.newTab", "New Tab", .file, KeyCombo("t")) { $0.launch() },
         Command("file.newPrivateTab", "New Private Tab", .file, KeyCombo("n", shift: true)) { $0.newShyTab() },
         Command("file.reopen", "Reopen Closed Tab", .file, KeyCombo("t", shift: true)) { $0.reopen() },
         Command("file.openAddress", "Open Address…", .file, KeyCombo("l")) { $0.edit() },
         Command("file.closeTab", "Close Tab", .file, KeyCombo("w")) { $0.closeFront() },
         Command("file.import", "Bring Things Over…", .file, nil) { $0.bringingIn = "" },
         Command("file.share", "Share…", .file, nil) { $0.share() },
+        Command("file.exportPDF", "Export as PDF…", .file, nil) { $0.exportPDF() },
         Command("file.print", "Print…", .file, KeyCombo("p")) { $0.printPage() },
 
         Command("edit.find", "Find on Page…", .edit, KeyCombo("f")) { $0.openFind() },
@@ -165,6 +167,8 @@ struct Command: Identifiable {
         Command("view.reloadOrigin", "Reload Page From Origin", .view, KeyCombo("r", option: true)) { $0.reload(fromOrigin: true) },
         Command("view.reader", "Reading Mode", .view, KeyCombo("r", shift: true)) { $0.toggleReader() },
         Command("view.float", "Float Video", .view, KeyCombo("p", shift: true)) { $0.toggleFloat() },
+        Command("view.dusk", "Darken This Site", .view, KeyCombo("d", shift: true)) { $0.toggleDusk() },
+        Command("view.duskPause", "Pause Darkening", .view, KeyCombo("d", shift: true, option: true)) { $0.pauseDusk() },
         Command("view.summarize", "Summarize Page", .view, nil) { $0.summarizePage() },
         Command("view.ask", "Ask About This Page…", .view, nil) { $0.askAboutPage() },
         Command("view.hide", "Hide Elements…", .view, KeyCombo("h", shift: true)) { $0.toggleHiding() },
@@ -434,4 +438,6 @@ extension Command {
                                      "tabs.swapSplit", "tabs.separateSplit"]
     /// The AI add-on's: with it off, not listed.
     static let ai: Set<String> = ["view.summarize", "view.ask"]
+    /// Dark pages': with them off, not listed, and their keys go on to the page.
+    static let dusk: Set<String> = ["view.dusk", "view.duskPause"]
 }
