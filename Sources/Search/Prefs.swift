@@ -23,6 +23,27 @@ enum Glyph: String, CaseIterable, Identifiable {
     }
 }
 
+/// Peek uses modified left clicks, leaving plain clicks and Control-click alone.
+enum PeekClick: String, CaseIterable {
+    case shift, optionShift, optionCommand
+
+    var title: String {
+        switch self {
+        case .shift: return "Shift-click"
+        case .optionShift: return "Option-Shift-click"
+        case .optionCommand: return "Option-Command-click"
+        }
+    }
+
+    var flags: NSEvent.ModifierFlags {
+        switch self {
+        case .shift: return .shift
+        case .optionShift: return [.option, .shift]
+        case .optionCommand: return [.option, .command]
+        }
+    }
+}
+
 /// How long a tab you aren't keeping stays open once you leave it (see
 /// Closing.swift): never, or one of Arc's four choices, counted in hours.
 enum TabLife: Int, CaseIterable, Identifiable {
@@ -43,10 +64,9 @@ enum TabLife: Int, CaseIterable, Identifiable {
     }
 }
 
-/// Where a new tab goes in the row (Settings › Tabs). Only `next` and
-/// `end` for now; a place at the top (#606) would be one more case.
+/// Where a new tab goes in the row (Settings › Tabs).
 enum NewTabPlace: String {
-    case next, end
+    case next, top, end
 }
 
 /// Which edge the tab column sits on when tabs are arranged in a sidebar.
@@ -146,6 +166,12 @@ final class Preferences: ObservableObject {
     @Published var keywords: [Keyword] {
         didSet { store.set((try? JSONEncoder().encode(keywords)) ?? Data(), forKey: "search.keywords") }
     }
+    @Published var keepsSitesAwake: Bool {
+        didSet { store.set(keepsSitesAwake, forKey: "tabs.keepAwake") }
+    }
+    @Published var awakeSites: Set<String> {
+        didSet { store.set(Array(awakeSites).sorted(), forKey: "tabs.awakeSites") }
+    }
     /// Tabs nobody has looked at for half an hour give their page back and
     /// keep where they were. On unless turned off.
     @Published var sleepsTabs: Bool {
@@ -178,9 +204,7 @@ final class Preferences: ObservableObject {
     @Published var newTabAfterLast: Bool {
         didSet { store.set(newTabAfterLast, forKey: "tabs.newAfterLast") }
     }
-    /// Where a new tab goes in the row: just after the tab you are on, or at
-    /// the end of the list. One choice rather than a switch, so the top of
-    /// the list (#606) can join it. Next unless asked for.
+    /// Where a new tab goes in the row. Next unless asked for.
     @Published var newTabPlace: NewTabPlace {
         didSet { store.set(newTabPlace.rawValue, forKey: "tabs.newPlace") }
     }
@@ -294,8 +318,11 @@ final class Preferences: ObservableObject {
             FrameRate.mode = fastPages
         }
     }
-    /// Shift-click on a link opens it in a panel over the page (see
-    /// Peek.swift). On unless turned off.
+    /// The modifier chosen in Settings › Shortcuts; Shift-click by default.
+    @Published var peekClick: PeekClick {
+        didSet { store.set(peekClick.rawValue, forKey: "links.peekClick") }
+    }
+    /// Open a clicked link over the page (see Peek.swift). On unless turned off.
     @Published var peeksLinks: Bool {
         didSet { store.set(peeksLinks, forKey: "links.peek") }
     }
@@ -490,6 +517,8 @@ final class Preferences: ObservableObject {
         customEngine = store.string(forKey: "search.custom") ?? ""
         keywords = store.data(forKey: "search.keywords")
             .flatMap { try? JSONDecoder().decode([Keyword].self, from: $0) } ?? []
+        keepsSitesAwake = store.bool(forKey: "tabs.keepAwake")
+        awakeSites = Set(store.stringArray(forKey: "tabs.awakeSites") ?? [])
         sleepsTabs = store.object(forKey: "tabs.sleep") as? Bool ?? true
         tabLife = TabLife(rawValue: store.integer(forKey: "tabs.close.after")) ?? .never
         sleepPace = SleepPace.chosen
@@ -568,6 +597,7 @@ final class Preferences: ObservableObject {
         waitsForPlay = store.bool(forKey: Preferences.waitsKey)
         installsUpdates = store.object(forKey: Updater.installKey) as? Bool ?? true
         peeksLinks = store.object(forKey: "links.peek") as? Bool ?? true
+        peekClick = store.string(forKey: "links.peekClick").flatMap(PeekClick.init(rawValue:)) ?? .shift
         littleLinks = store.bool(forKey: "links.little")
         bookmarksBar = store.bool(forKey: "bookmarks.bar")
         alwaysShowsDownloads = store.bool(forKey: "downloads.button")

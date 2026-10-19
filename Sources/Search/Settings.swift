@@ -141,7 +141,7 @@ struct SettingsPanel: View {
                     case .tabs:
                         tabs
                         if !prefs.sidebar { toolbar }
-                    case .shortcuts: ShortcutsPage(browser: browser, store: .shared)
+                    case .shortcuts: ShortcutsPage(browser: browser, store: .shared, prefs: prefs)
                     case .extensions: ExtensionsPage(browser: browser)
                     case .passwords: passwords
                     case .downloads: downloads
@@ -308,7 +308,7 @@ struct SettingsPanel: View {
                 Switch(on: $prefs.autocorrect)
             }
             Rule()
-            Line("Peek at a link with a shift-click", "Its page opens in a panel over the one you're reading. Escape puts it away; the other button keeps it as a tab") {
+            Line("Peek at a link with a \(prefs.peekClick.title.lowercased())", "Its page opens in a panel over the one you're reading. Escape puts it away; the other button keeps it as a tab") {
                 Switch(on: $prefs.peeksLinks)
             }
             Rule()
@@ -475,6 +475,13 @@ struct SettingsPanel: View {
                 .fixedSize()
             }
             Rule()
+            Line("Keep selected sites awake", "Adds Keep This Site Awake to the site card. Chosen sites use more memory: they neither sleep nor close automatically, even under memory pressure. Private choices last only in that tab.") {
+                Switch(on: $prefs.keepsSitesAwake)
+                    .accessibilityRepresentation { Toggle("Keep selected sites awake", isOn: $prefs.keepsSitesAwake) }
+                    .focusable()
+                    .onKeyPress(.space) { prefs.keepsSitesAwake.toggle(); return .handled }
+            }
+            Rule()
             Line("Load background tabs when you go to them", "A link opened behind the page, with ⌘-click or the middle button, or a batch of links from another app, waits until you go to its tab. ⇧⌘-click still takes you there at once.") {
                 Switch(on: $prefs.lazyTabs)
             }
@@ -483,8 +490,15 @@ struct SettingsPanel: View {
                 Switch(on: $prefs.newTabAfterLast)
             }
             Rule()
-            Line("Open new tabs at the end", "A new tab, or a link opened in one, goes to the bottom of the list instead of just after the tab you're on.") {
-                Switch(on: Binding(get: { prefs.newTabPlace == .end }, set: { prefs.newTabPlace = $0 ? .end : .next }))
+            Line("New tab position", "After current puts a link beside the tab you're on, and ⌘T's new tab at the end. Pins stay first; a link from a group stays in it.") {
+                Picker("New tab position", selection: $prefs.newTabPlace) {
+                    Text("After current").tag(NewTabPlace.next)
+                    Text(prefs.sidebar ? "Top" : "Leftmost").tag(NewTabPlace.top)
+                    Text(prefs.sidebar ? "Bottom" : "Rightmost").tag(NewTabPlace.end)
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .fixedSize()
             }
             Rule()
             Line("Search a site from the address field", "Type the start of a site's name, like red or yout, then Tab, and what you type next searches that site. Sites you visit that offer a search join the list.") {

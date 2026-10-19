@@ -337,7 +337,13 @@ final class Browser: NSObject, ObservableObject {
     /// Bumped when what was typed isn't an address and can't be searched for.
     @Published private(set) var refusals = 0
     /// Bumped whenever the cursor should go back into the field.
-    @Published private(set) var focusRequest = 0
+    @Published private(set) var focusRequest = 0 {
+        didSet { focusAsked = CACurrentMediaTime() }
+    }
+    /// When the field was last asked for the keys and hasn't taken them yet.
+    private var focusAsked: CFTimeInterval?
+    /// What was typed in that moment, for the field once it has the keys.
+    private var heldKeys: [NSEvent] = []
 
     /// True while the field is a switcher rather than an address bar. ⌘K asks
     /// one question — which of the pages I already have open — and answering it
@@ -2845,14 +2851,10 @@ final class Browser: NSObject, ObservableObject {
             Extensions.shared.offerNewTabPage(into: tab)
             return
         }
-        // Never two empty tabs. One already open anywhere in the row comes to
-        // its end and is the one opened, with whatever was typed into it and
-        // never gone to cleared away — a row of identical empty tabs is what
-        // pressing ⌘T twice, or holding it, used to leave.
+        // Reuse an empty tab at the chosen position, clearing its draft:
+        // repeated ⌘T must not leave a row of identical empty tabs.
         if let blank = tabs.last(where: { $0.isBlank && !$0.bench && !$0.shy && split(for: $0) == nil }) {
-            if let end = tabs.indices.last, tabs.firstIndex(where: { $0.id == blank.id }) != end {
-                move(blank, to: end)
-            }
+            placeBlank(blank)
             if activeID != blank.id { leaving() }
             activeID = blank.id
             summoning = false
@@ -2867,7 +2869,8 @@ final class Browser: NSObject, ObservableObject {
             return
         }
         let tab = Tab(configuration: Web.configuration(space: spaceID))
-        adopt(tab)
+        prepare(tab)
+        tabs.insert(tab, at: placeForFront())
         leaving()
         activeID = tab.id
         summoning = false
@@ -3927,11 +3930,9 @@ final class Browser: NSObject, ObservableObject {
     /// history, and no place in tomorrow's session.
     func newShyTab() {
         // Never two empty private tabs, as ⌘T never makes two empty ones:
-        // one already open comes to the end of the row and is the one opened.
-        if let blank = tabs.last(where: { $0.isBlank && $0.shy && !$0.bench }) {
-            if let end = tabs.indices.last, tabs.firstIndex(where: { $0.id == blank.id }) != end {
-                move(blank, to: end)
-            }
+        // one already open is moved to the chosen position.
+        if let blank = tabs.last(where: { $0.isBlank && $0.shy && !$0.bench && split(for: $0) == nil }) {
+            placeBlank(blank)
             if activeID != blank.id { leaving() }
             activeID = blank.id
             summoning = false
@@ -3942,7 +3943,8 @@ final class Browser: NSObject, ObservableObject {
             return
         }
         let tab = Tab(shy: true)
-        adopt(tab)
+        prepare(tab)
+        tabs.insert(tab, at: placeForFront())
         leaving()
         activeID = tab.id
         summoning = false
@@ -4113,11 +4115,25 @@ final class Browser: NSObject, ObservableObject {
     /// them. A link from another app, with a pin in front, landed between two
     /// (#219).
     func placeForNew() -> Int {
-        // Settings › Tabs › Open new tabs at the end.
+        if prefs.newTabPlace == .top { return pinnedCount }
         if prefs.newTabPlace == .end { return tabs.count }
         guard let here = tabs.firstIndex(where: { $0.id == activeID }) else { return tabs.count }
         let after = activeSplit.flatMap { pair in tabs.firstIndex { $0.id == pair.right } } ?? here
         return max(after + 1, pinnedCount)
+    }
+
+    /// Where ⌘T's tab goes, a private one, and a page a link opens in front
+    /// of you: the end of the row, as always, unless the top was chosen.
+    /// After current is for links opened from the tab you are on.
+    func placeForFront() -> Int {
+        prefs.newTabPlace == .top ? pinnedCount : tabs.count
+    }
+
+    private func placeBlank(_ tab: Tab) {
+        guard let from = tabs.firstIndex(where: { $0.id == tab.id }) else { return }
+        let to = placeForFront()
+        // Moving an existing tab removes its old slot before inserting it.
+        move(tab, to: from < to ? to - 1 : to)
     }
 
     /// A tab made outside the row — a peek being kept — put in it at `index`.
@@ -4361,7 +4377,7 @@ final class Browser: NSObject, ObservableObject {
         // The middle button on a link opens it beside the tab you are on, as
         // it does in every other browser (see MiddleRelay).
         // From a private tab, the new one is private too, as for ⌘-click.
-        tab.onMiddleClick = { [weak self] tab, url in self?.open(url, foreground: false, from: tab, mayWait: true) }
+        tab.onMiddleClick = { [weak self] tab, url in self?.openClicked(url, foreground: false, from: tab, view: tab.built) }
         tab.onCross = { [weak self] tab, url in self?.replace(tab, going: url) }
 
         // The caret in a sign-in box: the accounts kept for this site hang
@@ -4427,6 +4443,44 @@ final class Browser: NSObject, ObservableObject {
 
     /// Put the cursor back in the field, from wherever asked.
     func askFocus() { focusRequest += 1 }
+
+    /// A key typed between ⌘T and the field taking the keys, kept for it.
+    ///
+    /// The field comes a turn or two of the run loop after it is asked for —
+    /// later still with Split View, where it waits for the stage to say where
+    /// the page is — and a hand already typing got there first: the first
+    /// letter or two went to the page being left, or nowhere. Held for half
+    /// a second at most, and only typing: a key with ⌘ or ⌃ is a shortcut.
+    func holdKey(_ event: NSEvent) -> Bool {
+        guard let asked = focusAsked, CACurrentMediaTime() - asked < 0.5,
+              fieldShowing, editingTab == nil,
+              event.modifierFlags.intersection([.command, .control]).isEmpty
+        else { return false }
+        if heldKeys.isEmpty {
+            // The field never came: what was typed goes where it would have.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                guard let self, !self.heldKeys.isEmpty else { return }
+                self.focusAsked = nil
+                self.letGo(in: event.window)
+            }
+        }
+        heldKeys.append(event)
+        return true
+    }
+
+    /// The field has the keys: what was held goes to it, in order.
+    func fieldFocused(in window: NSWindow) {
+        focusAsked = nil
+        letGo(in: window)
+    }
+
+    private func letGo(in window: NSWindow?) {
+        let held = heldKeys
+        heldKeys = []
+        // Straight to the window, which hands a key to whatever has the
+        // keys: not back through the app, whose monitor would hold it again.
+        for event in held { window?.sendEvent(event) }
+    }
 
     // MARK: - guessing
 
@@ -4922,12 +4976,12 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
             decisionHandler(.cancel)
             return
         }
-        // Shift-click, when Settings says so: a peek at the link, over this
+        // The chosen modified click: a peek at the link, over this
         // page (see Peek.swift). Only from a tab in the row — within a peek,
         // a link just goes.
         if prefs.peeksLinks, action.navigationType == .linkActivated,
            ["http", "https"].contains(scheme),
-           action.modifierFlags.intersection([.shift, .command, .option, .control]) == .shift,
+           action.modifierFlags.intersection([.shift, .command, .option, .control]) == prefs.peekClick.flags,
            let from = tab(for: webView), peekTab == nil {
             decisionHandler(.cancel)
             DispatchQueue.main.async { [weak self] in self?.peek(url, from: from) }
@@ -4936,7 +4990,7 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         if action.navigationType == .linkActivated,
            ["http", "https"].contains(scheme),
            action.modifierFlags.contains(.command) {
-            open(url, foreground: action.modifierFlags.contains(.shift), from: tab(for: webView), mayWait: true)
+            openClicked(url, foreground: action.modifierFlags.contains(.shift), from: tab(for: webView), view: webView)
             decisionHandler(.cancel)
             return
         }
@@ -5077,14 +5131,15 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         tab.popup = windowFeatures.width != nil || windowFeatures.height != nil
             || windowFeatures.toolbarsVisibility?.boolValue == false
         tab.opener = from
+        opener.popupGesture.opened(tab.id)
         // The link menu's Open Link in New Tab: behind this tab, where a
         // ⌘-click's goes (see open(_:foreground:)).
+        prepare(tab)
         if (webView as? PageView)?.takeBehind() == true, let source = self.tab(for: webView) {
-            prepare(tab)
             if prefs.usesTabGroups, !tab.shy, !tab.bench { tab.groupID = source.groupID }
             tabs.insert(tab, at: placeForNew())
         } else {
-            adopt(tab)
+            tabs.insert(tab, at: placeForFront())
             activeID = tab.id
             editing = false
         }
@@ -5092,6 +5147,22 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         // request into it itself when the action carries one.
         if let url = action.request.url { tab.setAddressOptimistically(url) }
         return tab.web
+    }
+
+    /// A link clicked open in a tab by Search itself (⌘-click, the middle
+    /// button): one click, one tab. When the page's own script already
+    /// opened a window for that click, it is the tab — put where the click
+    /// asked, behind unless ⇧ was held — and no second one opens. Otherwise
+    /// the click is spent, and a window.open after it gets nothing.
+    private func openClicked(_ url: URL, foreground: Bool, from source: Tab?, view: WKWebView?) {
+        let opener = view.flatMap { popupTab(for: $0) }
+        if let made = opener?.popupGesture.claim(), let tab = tabs.first(where: { $0.id == made }) {
+            if !foreground, activeID == tab.id, let source, tabs.contains(where: { $0.id == source.id }) {
+                activeID = source.id
+            }
+            return
+        }
+        open(url, foreground: foreground, from: source, mayWait: true)
     }
 
     /// Anything the window can't show is something to keep instead.
@@ -5599,6 +5670,11 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         // page didn't load" over a download that had worked — clicked again,
         // it downloaded again.
         guard !(nsError.domain == "WebKitErrorDomain" && code == 102) else { return }
+        // Nor is a video or sound file opened as a page: WebKit's own player
+        // takes it over and ends the load with "plug-in handled load" (204),
+        // as in Safari, while the video plays. Answered as a failure, it
+        // covered the playing video with "The page didn't load".
+        guard !(nsError.domain == "WebKitErrorDomain" && code == 204) else { return }
         tab?.failure = message(for: code)
     }
 
